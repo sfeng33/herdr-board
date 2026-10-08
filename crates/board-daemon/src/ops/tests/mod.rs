@@ -271,7 +271,8 @@ type FakePane = (String, String, Option<String>, Option<String>);
 /// Knobs for [`fake_rescue_herdr`].
 #[derive(Clone, Copy, Default)]
 struct RescueFakeFaults {
-    /// `pane.split` refuses, i.e. the new pane cannot be created.
+    /// `pane.split` and `tab.create` refuse, i.e. the new pane cannot be
+    /// created.
     split_fails: bool,
     /// `agent.start` refuses, i.e. the harness will not start in the new pane.
     agent_start_fails: bool,
@@ -347,12 +348,12 @@ impl RescueFake {
         pane.3 = None;
     }
 
-    /// The env of the last `pane.split`, i.e. what the rescued pane received.
-    /// Pane-first placement puts the run environment on
-    /// `pane.split`, NOT on `agent.start`.
-    fn last_split_env(&self) -> BTreeMap<String, String> {
-        let splits = self.herdr.requests_for("pane.split");
-        let last = splits.last().expect("a pane.split happened");
+    /// The env of the last `tab.create`, i.e. what the rescued pane received.
+    /// [fork] The rescue tab's root pane carries the run environment, NOT
+    /// `agent.start`.
+    fn last_rescue_tab_env(&self) -> BTreeMap<String, String> {
+        let creates = self.herdr.requests_for("tab.create");
+        let last = creates.last().expect("a tab.create happened");
         serde_json::from_value(last["params"]["env"].clone()).unwrap_or_default()
     }
 }
@@ -575,6 +576,9 @@ fn fake_rescue_herdr(faults: RescueFakeFaults) -> RescueFake {
                     let label = params["label"].as_str().unwrap_or("").to_string();
                     tab_labels.lock().unwrap().insert(tab_id.clone(), label.clone());
                     testkit::reply(request, json!({"type":"tab_info","tab":tab_json(&tab_id, &label)}))
+                }
+                "tab.create" if faults.split_fails => {
+                    testkit::error(request, "tab_create_failed", "no room for another tab")
                 }
                 "tab.create" => {
                     let mut counter = next_tab.lock().unwrap();

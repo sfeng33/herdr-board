@@ -97,7 +97,7 @@ fn run_focus_rescues_into_a_new_workspace_when_the_recorded_workspace_is_gone() 
     );
     assert_eq!(fake.workspace_ids(), vec!["w2".to_string()]);
     assert_eq!(
-        fake.count("pane.split"),
+        fake.count("tab.create"),
         1,
         "a second rescue pane was created"
     );
@@ -167,7 +167,7 @@ fn run_focus_rescue_keeps_ownership_when_an_ambiguous_cwd_resolves_back_to_the_r
     assert_eq!(again["action"], "focused_rescued_pane");
     assert_eq!(again["pane_id"], pane_id);
     assert_eq!(
-        fake.count("pane.split"),
+        fake.count("tab.create"),
         1,
         "a second rescue pane was created"
     );
@@ -271,7 +271,7 @@ fn run_focus_rescue_refuses_when_the_card_config_cannot_replace_the_workspace() 
     );
     // Nothing was created and nothing was written.
     assert_eq!(fake.workspace_creates().len(), 0);
-    assert_eq!(fake.count("pane.split"), 0);
+    assert_eq!(fake.count("tab.create"), 0);
     assert_eq!(runs_fingerprint(&d, card_id), before);
 }
 
@@ -443,11 +443,10 @@ fn runs_fingerprint(d: &Arc<Daemon>, card_id: i64) -> String {
 }
 
 #[test]
-fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_db() {
-    // The card's tab and shell anchor survive the dead pane; the rescue splits
-    // a fresh child from the anchor, and because this is a MANAGED rescue the
-    // anchor is then closed too (the same anchorless convergence dispatch
-    // applies), leaving exactly the rescued harness pane in the card tab.
+fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_tab_without_touching_the_db() {
+    // [fork] The card's tab and shell anchor survive the dead pane; the rescue
+    // leaves them alone and resumes the conversation in a new `card-<id> r<run>`
+    // tab of its own.
     let fake = fake_rescue_herdr(RescueFakeFaults::default());
     let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
     let (card_id, run_id) = add_rescuable_run(&d, "claude", Some("claude"), Some("conv-1"), true);
@@ -463,28 +462,28 @@ fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_
     assert_eq!(result["action"], "rescued");
     // The dead pane is reported for diagnostics; the focused pane is the new one.
     assert_eq!(result["recorded_pane_id"], "w1:p9");
-    assert_eq!(result["pane_id"], "w1:rescued1");
+    assert_eq!(result["pane_id"], "w1:root1");
     assert_eq!(result["run_id"].as_i64().unwrap(), run_id);
     assert_eq!(result["session_id"], "conv-1");
 
-    // A managed rescue converges its tab to exactly one harness pane: the
-    // pre-existing shell anchor is closed once the resume launch succeeded
-    // (`pane_not_found` would count as closed; any other failure warns and
-    // keeps the successful rescue). The unrelated user pane and the rescued
-    // harness pane are the only panes left.
-    let closes = fake.herdr.requests_for("pane.close");
+    // The card tab is untouched: nothing is split into it and nothing is
+    // closed. The rescue tab is named after the card and run.
+    assert_eq!(fake.count("pane.split"), 0);
+    assert_eq!(fake.count("pane.close"), 0);
+    let creates = fake.herdr.requests_for("tab.create");
+    assert_eq!(creates.len(), 1);
     assert_eq!(
-        closes
-            .iter()
-            .map(|request| request["params"]["pane_id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["w1:anchor"],
-        "the successful managed rescue closes exactly the card-tab anchor"
+        creates[0]["params"]["label"],
+        format!("card-{card_id} r{run_id}")
     );
     assert_eq!(
         fake.pane_ids(),
-        vec!["w1:foreign".to_string(), "w1:rescued1".to_string()],
-        "the rescued harness pane and the unrelated user pane survive"
+        vec![
+            "w1:anchor".to_string(),
+            "w1:foreign".to_string(),
+            "w1:root1".to_string()
+        ],
+        "the card-tab anchor, the unrelated user pane and the rescue tab survive"
     );
 
     // The harness was started in *resume* mode with the persisted conversation
@@ -528,8 +527,8 @@ fn run_focus_rescues_a_dead_pane_by_resuming_in_a_new_pane_without_touching_the_
 
 #[test]
 fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credential() {
-    // Pane-first placement puts the run environment on
-    // `pane.split`, not `agent.start`. Without it a harness that reads the board
+    // [fork] The rescue tab's root pane carries the run environment, not
+    // `agent.start`. Without it a harness that reads the board
     // env (every checked-in fixture does, under `set -u`) exits immediately.
     let fake = fake_rescue_herdr(RescueFakeFaults::default());
     let d = test_daemon_with_herdr_spawner(Config::default(), fake.socket.clone());
@@ -542,7 +541,7 @@ fn run_focus_rescue_gives_the_new_pane_the_board_env_but_never_the_run_credentia
     )
     .unwrap();
 
-    let env = fake.last_split_env();
+    let env = fake.last_rescue_tab_env();
     assert_eq!(env.get("BOARD_CARD_ID"), Some(&card_id.to_string()));
     assert_eq!(
         env.get("BOARD_SOCKET").map(String::as_str),
@@ -619,7 +618,7 @@ fn run_focus_rescue_dedup_survives_a_column_rename() {
         "a column rename must not hide the pane the rescue just created"
     );
     assert_eq!(second["pane_id"], pane);
-    assert_eq!(fake.count("pane.split"), 1);
+    assert_eq!(fake.count("tab.create"), 1);
 }
 
 #[test]
@@ -728,7 +727,7 @@ fn run_focus_rescue_is_idempotent_and_never_leaves_two_panes() {
     .unwrap();
     assert_eq!(second["action"], "focused_rescued_pane");
     assert_eq!(second["pane_id"], pane);
-    assert_eq!(fake.count("pane.split"), 1, "a second pane was created");
+    assert_eq!(fake.count("tab.create"), 1, "a second pane was created");
     assert_eq!(fake.count("agent.start"), 1, "the harness was restarted");
 }
 
@@ -760,7 +759,7 @@ fn run_focus_refuses_to_rescue_a_harness_without_resume_support() {
     assert!(msg.contains("resum"), "explains why: {msg}");
     // Never a fresh conversation as a fallback, and never a db write.
     assert_eq!(fake.count("agent.start"), 0);
-    assert_eq!(fake.count("pane.split"), 0);
+    assert_eq!(fake.count("tab.create"), 0);
     assert_eq!(runs_fingerprint(&d, card_id), before);
 }
 
@@ -790,7 +789,7 @@ fn run_focus_rescues_a_configured_harness_that_opts_into_resume() {
     .unwrap_err();
     // Not a capability refusal: the opt-in was accepted and placement happened.
     assert_eq!(err.code(), 4, "{err}");
-    assert_eq!(fake.count("pane.split"), 1, "the rescue pane was created");
+    assert_eq!(fake.count("tab.create"), 1, "the rescue pane was created");
     // Failure is non-destructive: the pane it created is closed again. (This
     // fake cannot emulate the external `herdr pane run` bridge a configured
     // harness needs, so the launch itself always fails here; what matters is
@@ -815,7 +814,7 @@ fn run_focus_refuses_to_rescue_a_run_without_a_recorded_conversation_id() {
     let msg = err.to_string();
     assert!(msg.contains("conversation id"), "message: {msg}");
     assert!(msg.contains("w1:p9"), "names the dead pane: {msg}");
-    assert_eq!(fake.count("pane.split"), 0);
+    assert_eq!(fake.count("tab.create"), 0);
     assert_eq!(runs_fingerprint(&d, card_id), before);
 }
 
@@ -862,11 +861,8 @@ fn run_focus_rescue_closes_its_pane_when_the_harness_will_not_start() {
         err.to_string().contains("harness refused to start"),
         "{err}"
     );
-    // Non-destructive: the half-built rescue pane is closed again. Here the card
-    // tab already existed, so that child is the only thing this rescue created.
-    // The case where placement also had to create the tab — and must therefore
-    // remove the tab too, or repeated presses of `o` orphan one each time — is
-    // `run_focus_rescue_that_created_a_card_tab_removes_it_again_on_failure`.
+    // Non-destructive: the half-built rescue tab's sole pane is closed again,
+    // which removes the tab too.
     assert_eq!(fake.count("pane.close"), 1);
     assert_eq!(
         fake.pane_ids(),

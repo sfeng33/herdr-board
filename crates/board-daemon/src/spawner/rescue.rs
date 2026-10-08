@@ -6,8 +6,8 @@
 //! historical `runs` row stays immutable, so the pane created here has no run
 //! row and is therefore not owned, watched, or timed out by the daemon.
 //!
-//! The dead pane id is never reused or revived; a brand-new pane is split into
-//! the card's tab and the harness conversation is resumed in it.
+//! The dead pane id is never reused or revived; a brand-new tab is created next
+//! to the card's tab and the harness conversation is resumed in it.
 //!
 //! Concurrency: a rescue places panes into the very same `card-<id>` tabs as
 //! dispatch, and board requests are served concurrently (one task per
@@ -21,14 +21,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use board_herdr::{AgentStatus, HerdrClient, PaneInfo, PaneRenameParams};
+use board_herdr::{AgentStatus, HerdrClient, PaneInfo, PaneRenameParams, TabCreateParams};
 
 use super::card_tabs::{CardTabKey, CardTabRegistry};
 use super::herdr::{
     launch_configured, launch_managed, HerdrCliPaneRunner, PaneRunner, DEFAULT_AGENT_START_DELAY,
 };
 use super::placement::{
-    allocate_owned_pane, close_owned_after_error, close_owned_for_retry, is_pane_not_found,
+    close_owned_after_error, close_owned_for_retry, is_pane_not_found,
     mark_retryable_placement_race, CardOwnership,
 };
 use super::{HerdrLaunchPlan, WorkspaceBootstrapHint};
@@ -45,8 +45,10 @@ pub(crate) struct RescuePlan<'a> {
     /// but stable identity (card id + run id). See [`find_rescued_pane`] for the
     /// honest limits of that.
     pub(crate) marker_name: &'a str,
-    /// `card-<id>` — the durable card tab to place the pane in.
+    /// `card-<id>` — the durable card tab; keys the allocation lock.
     pub(crate) tab_label: &'a str,
+    /// [fork] `card-<id> r<run>` — the label of the tab the rescue creates.
+    pub(crate) rescue_tab_label: &'a str,
     /// The placement workspace: the run's recorded workspace when it is still
     /// usable, else the replacement resolved from the card's current space
     /// config. Final by construction — the caller resolves it before the plan
@@ -69,6 +71,9 @@ pub(crate) struct RescuePlan<'a> {
     /// Exact tab/pane ownership evidence from the card's run rows. Note that
     /// `reclaimable_pane_ids` is always empty for a rescue: reopening one run
     /// must never close another run's pane.
+    // [fork] Unused since rescues create their own tab; kept to stay close to
+    // upstream.
+    #[allow(dead_code)]
     pub(crate) ownership: CardOwnership<'a>,
     /// The resume launch, built by [`board_core::harness::resume_invocation`]
     /// from the run's persisted execution spec (so model/effort/env match the
@@ -231,112 +236,86 @@ pub(crate) fn rescue_run_pane(plan: &RescuePlan<'_>) -> anyhow::Result<RescueOut
     // implicit directory.
     let cwd = plan.cwd.clone();
 
+    // [fork] The rescue gets its own tab (`card-<id> r<run>`) instead of a pane
+    // split into the card tab. The tab is not registered as the card tab, so
+    // dispatch never places a later run in it; its root pane carries the run
+    // env at creation, exactly like a split child would.
     let env: BTreeMap<String, String> = plan.execution.env.iter().cloned().collect();
-    let remembered = plan
-        .card_tabs
-        .as_ref()
-        .map(|registry| registry.remembered(&tab_key))
-        .transpose()?
-        .flatten();
-    // Prefer the caller's durable evidence, then this daemon's memory of the tab
-    // (which may be a tab an earlier rescue created).
-    let owned_tab_id = plan
-        .ownership
-        .owned_tab_id
-        .map(str::to_string)
-        .or_else(|| remembered.as_ref().map(|owned| owned.tab_id.clone()));
-    let owned = allocate_owned_pane(
-        &mut client,
-        plan.workspace_id,
-        plan.tab_label,
-        Some(cwd.as_path()),
-        &env,
-        CardOwnership {
-            owned_tab_id: owned_tab_id.as_deref(),
-            bootstrap: plan.bootstrap,
-            durable_pane_ids: plan.ownership.durable_pane_ids,
-            // A rescue never reclaims (closes) another run's pane.
-            reclaimable_pane_ids: &[],
-            durable_anchor_pane_ids: plan.ownership.durable_anchor_pane_ids,
-            remembered_anchor_id: remembered
-                .as_ref()
-                .map(|owned| owned.anchor_pane_id.as_str()),
-            // A rescue always splits a fresh pane (the run's pane is dead);
-            // it never reuses a prior pane.
-            reuse_pane_id: None,
-            reuse_agent_kind: None,
-        },
-    )
-    .with_context(|| {
-        format!(
-            "placing a rescue pane in tab '{}' for {}",
-            plan.tab_label, plan.marker_name
-        )
-    })?;
-    if owned.pane_id.is_empty() {
+    let created = client
+        .tab_create(&TabCreateParams {
+            workspace_id: Some(plan.workspace_id.to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            label: Some(plan.rescue_tab_label.to_string()),
+            env,
+            focus: false,
+        })
+        .map_err(anyhow::Error::new)
+        .with_context(|| {
+            format!(
+                "creating rescue tab '{}' for {}",
+                plan.rescue_tab_label, plan.marker_name
+            )
+        })?;
+    let pane_id = created.root_pane.pane_id;
+    if pane_id.is_empty() {
         return Err(anyhow!("herdr returned an empty rescue pane id"));
     }
 
-    // Did placement have to create the tab? `allocate_card_pane` creates one
-    // whenever the exact owned tab id does not resolve, so a tab id we did not
-    // ask for is a new tab — and a failure below must then close its anchor too,
-    // not just the child, or the empty tab is orphaned forever (a rescue leaves
-    // no run row that could ever reclaim it).
-    let created_tab = owned_tab_id.as_deref() != Some(owned.tab_id.as_str());
-
-    // Remember the exact tab/anchor for the next allocation — including a tab
-    // this rescue created, so a later dispatch reuses it instead of making a
-    // second one.
-    if let (Some(registry), Some(anchor)) = (plan.card_tabs.as_ref(), owned.anchor_pane_id.as_ref())
-    {
-        registry.remember(tab_key.clone(), owned.tab_id.clone(), anchor.clone())?;
+    if let Err(error) = launch_rescue(&mut client, plan, &cwd, &pane_id) {
+        return Err(abandon_rescue(&mut client, plan, &pane_id, error));
     }
 
-    let launched = launch_rescue(&mut client, plan, &cwd, &owned.pane_id);
-    if let Err(error) = launched {
-        return Err(abandon_rescue(
-            &mut client,
-            plan,
-            &tab_key,
-            &owned,
-            created_tab,
-            error,
-        ));
-    }
-
-    // Managed card tabs converge to exactly one harness pane for a rescue too:
-    // once the resumed harness launched successfully, close the anchor — the
-    // same rule dispatch applies, with the same semantics. `pane_not_found`
-    // counts as closed (the anchor was already gone, e.g. a concurrent close
-    // removed it); any other close failure must not fail an already-successful
-    // rescue, so warn and keep the anchor — the registry's remembered id is
-    // never treated as live because the allocator revalidates exact ids.
-    // Configured harnesses keep their persistent anchor unchanged: `pane run`
-    // exits close their child, so the anchor is what the next run splits from.
-    if plan.execution.agent_kind.is_some() {
-        if let Some(anchor) = owned.anchor_pane_id.as_deref() {
-            if let Err(error) = close_owned_for_retry(&mut client, anchor) {
-                tracing::warn!(
-                    pane_id = anchor,
-                    error_category = "herdr",
-                    error = %format!("{error:#}"),
-                    "managed rescue succeeded but closing the tab anchor failed; keeping it"
-                );
-            }
-        }
+    // A workspace this resolution created starts with an idle initial tab; the
+    // rescue tab replaced it, so close it rather than leave an empty shell.
+    if let Some(bootstrap) = plan.bootstrap {
+        close_pristine_bootstrap_root(&mut client, plan.workspace_id, bootstrap);
     }
 
     // The rescue has already succeeded here: the pane exists and the
     // conversation is resumed in it. A focus failure is cosmetic, so warn rather
     // than turn a completed rescue into an error the caller would only discover
     // was a lie on the next `o`.
-    if client.pane_focus(&owned.pane_id).is_err() {
+    if client.pane_focus(&pane_id).is_err() {
         tracing::warn!(
             error_category = "herdr",
             "rescued run pane was created and resumed, but focusing it failed"
         );
     }
-    Ok(RescueOutcome::Created(owned.pane_id))
+    Ok(RescueOutcome::Created(pane_id))
+}
+
+/// Close the initial tab of a workspace this rescue created, but only while its
+/// root is still the tab's sole, agent-free pane. Best effort: a leftover idle
+/// tab is cosmetic, so failures only warn.
+fn close_pristine_bootstrap_root(
+    client: &mut HerdrClient,
+    workspace_id: &str,
+    bootstrap: &WorkspaceBootstrapHint,
+) {
+    let panes = match client.pane_list(Some(workspace_id)) {
+        Ok(panes) => panes,
+        Err(error) => {
+            tracing::warn!(error_category = "herdr", error = %error,
+                "could not list panes to close the created workspace's initial tab");
+            return;
+        }
+    };
+    let in_tab: Vec<_> = panes
+        .iter()
+        .filter(|pane| pane.tab_id == bootstrap.tab_id)
+        .collect();
+    let pristine = in_tab.len() == 1
+        && in_tab[0].pane_id == bootstrap.root_pane_id
+        && in_tab[0].agent.is_none();
+    if !pristine {
+        return;
+    }
+    if let Err(error) = client.pane_close(&bootstrap.root_pane_id) {
+        if !is_pane_not_found(&error) {
+            tracing::warn!(error_category = "herdr", error = %error,
+                "could not close the created workspace's initial tab");
+        }
+    }
 }
 
 /// Label the new pane with the dedup marker, then start the resumed harness in
@@ -415,48 +394,21 @@ fn launch_rescue(
     }
 }
 
-/// Undo everything this rescue created. Always the child pane; additionally the
-/// anchor (which removes the otherwise-empty tab) when placement had to create
-/// the tab. Unlike dispatch, a rescue has neither a retry nor a run row, so an
-/// orphan left here is permanent.
+/// Undo everything this rescue created. Closing the rescue tab's sole pane
+/// removes the tab too. Unlike dispatch, a rescue has neither a retry nor a run
+/// row, so an orphan left here is permanent.
 fn abandon_rescue(
     client: &mut HerdrClient,
     plan: &RescuePlan<'_>,
-    tab_key: &CardTabKey,
-    owned: &super::placement::OwnedPane,
-    created_tab: bool,
+    pane_id: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
-    let error = close_owned_after_error(client, &owned.pane_id, error);
-    if !created_tab {
-        return error;
-    }
-    if let Some(registry) = plan.card_tabs.as_ref() {
-        if let Err(forget_error) = registry.forget(tab_key) {
-            return error.context(format!(
-                "additionally failed to forget the card tab this rescue created: {forget_error:#}"
-            ));
-        }
-    }
-    let Some(anchor) = owned.anchor_pane_id.as_deref() else {
-        return error;
-    };
-    let error = match client.pane_close(anchor) {
-        Ok(()) => error,
-        Err(cleanup_error) if is_pane_not_found(&cleanup_error) => error,
-        Err(cleanup_error) => error.context(format!(
-            "additionally failed to close the card tab this rescue created (anchor {anchor}): \
-             {cleanup_error}"
-        )),
-    };
+    let error = close_owned_after_error(client, pane_id, error);
     // A workspace THIS resolution created and then abandoned must not be left
-    // behind either: everything in it is ours (the adopted initial tab was
-    // cleaned up above), nothing else can own it, and a later `o` would only
-    // hit the same "no live pane cwd" dead end. Closing it lets the next
-    // attempt resolve — and create — a fresh workspace instead. The
-    // `created_tab` guard keeps a concurrent placement that adopted the same
-    // fresh workspace (narrow label-reuse race) from being torn down.
-    if created_tab && plan.bootstrap.is_some() {
+    // behind either: everything in it is ours, nothing else can own it, and a
+    // later `o` would only hit the same "no live pane cwd" dead end. Closing it
+    // lets the next attempt resolve — and create — a fresh workspace instead.
+    if plan.bootstrap.is_some() {
         if let Err(cleanup_error) = client.workspace_close(plan.workspace_id) {
             return error.context(format!(
                 "additionally failed to close the workspace this rescue created ({}): \

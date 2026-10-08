@@ -8,7 +8,7 @@ mod race;
 
 #[cfg(test)]
 pub(crate) use alloc::grid_slot;
-pub(crate) use alloc::{allocate_owned_pane, CardOwnership, OwnedPane};
+pub(crate) use alloc::{allocate_owned_pane, CardOwnership};
 #[cfg(test)]
 pub(crate) use geometry::{
     initial_split_geometry, recovery_target_ratio, split_geometry, ANCHOR_RATIO,

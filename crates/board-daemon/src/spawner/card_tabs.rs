@@ -88,6 +88,8 @@ impl CardTabRegistry {
     /// Forget a key whose tab could not be kept (e.g. a rescue that created a
     /// tab and then failed, and closed it again). Leaving a stale id behind
     /// would make the next allocation try to split from a pane that is gone.
+    // [fork] Unused since rescues create their own unregistered tab.
+    #[allow(dead_code)]
     pub(crate) fn forget(&self, key: &CardTabKey) -> anyhow::Result<()> {
         self.owned
             .lock()

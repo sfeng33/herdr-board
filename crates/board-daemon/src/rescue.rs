@@ -308,6 +308,8 @@ fn rescue_run(
     // and rescue only affects freshly created tabs: existing tabs are reused
     // by exact tab id, never by this label.
     let tab_label = capability::card_tab_label(run.card_id, &card.title);
+    // [fork] The rescue itself opens in its own tab, named after the run.
+    let rescue_tab_label = format!("card-{} r{}", run.card_id, run.id);
 
     // 6. The placement workspace is the run's recorded workspace when it is
     //    still usable; otherwise it is a replacement resolved from the card's
@@ -420,6 +422,7 @@ fn rescue_run(
     let plan = RescuePlan {
         marker_name: &marker_name,
         tab_label: &tab_label,
+        rescue_tab_label: &rescue_tab_label,
         workspace_id: &workspace_id,
         cwd,
         bootstrap: bootstrap.as_ref(),
