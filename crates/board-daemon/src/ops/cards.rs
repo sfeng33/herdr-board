@@ -434,6 +434,9 @@ pub(super) fn card_move(d: &Arc<Daemon>, p: CardMoveParams) -> Result<Value> {
     );
     if enqueue {
         d.wake_dispatch();
+    } else if target.trigger == board_core::protocol::Trigger::Manual {
+        let from = d.store.lock().require_column(source_column_id).ok();
+        crate::hooks::fire(d, &card, from.as_ref(), &target);
     }
     stamp_card_labels(d, &mut card);
     Ok(json!(card))

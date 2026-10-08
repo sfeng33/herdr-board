@@ -75,6 +75,9 @@ pub struct Config {
     /// Config-defined harnesses keyed by name (`[harness.NAME]`).
     #[serde(default)]
     pub harness: HashMap<String, HarnessDef>,
+    /// [fork] Commands run when a card enters a column (`[[hook]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook: Vec<HookDef>,
     /// Pi agent dir to read the live model catalog from (`auth.json` +
     /// `models-store.json`). `None` disables live Pi model discovery → the
     /// `pi` harness reports the static free-form catalog (`models: []`). The
@@ -144,12 +147,35 @@ pub struct HarnessDef {
     pub resume: bool,
 }
 
+/// [fork] A command the daemon runs when a card enters a column.
+///
+/// For an auto column it runs before each run's agent starts, and the daemon
+/// waits for it: a failing hook fails the run. For a manual column it starts
+/// after the card lands there (moved in, or routed by a finished run) and is
+/// not waited for. The command runs through `sh -c` in the project directory
+/// with the run's board env plus `BOARD_TO_COLUMN`, `BOARD_FROM_COLUMN` (when
+/// known) and `BOARD_PROJECT`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDef {
+    /// Project scope path the hook applies to (`~/` allowed); `None` = all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Column name, matched case-insensitively.
+    pub column: String,
+    /// Shell command to run.
+    pub on_enter: String,
+    /// Seconds before a waited-for hook is killed and fails (default 600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             max_concurrent: default_max_concurrent(),
             idle_grace_seconds: default_idle_grace_seconds(),
             harness: HashMap::new(),
+            hook: Vec::new(),
             pi_agent_dir: None,
             codex_home: None,
             opencode_bin: None,

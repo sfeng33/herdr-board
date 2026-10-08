@@ -74,6 +74,34 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
         let db = d.store.lock();
         db.require_column(run.column_id)?
     };
+    // [fork] on_enter hooks run first; one may edit the card (e.g. point it at
+    // a new worktree), so the launch then uses the card as reloaded.
+    let reloaded;
+    let mut task_file = None;
+    let card = match crate::hooks::run_before_launch(d, card, &column).await {
+        Ok(hooks) if !hooks.ran => card,
+        Ok(hooks) => {
+            task_file = hooks.task_file;
+            let db = d.store.lock();
+            reloaded = match hooks.space {
+                // Applied directly: `card.update` refuses space edits while
+                // this very run is open.
+                Some(space) => db.update_card(&board_core::protocol::CardUpdateParams {
+                    id: card.id,
+                    space_kind: Some(board_core::protocol::SpaceKind::NewWorkspace),
+                    space_ref: board_core::protocol::Patch::Set(space.space_ref),
+                    space_cwd: board_core::protocol::Patch::Set(space.space_cwd),
+                    ..Default::default()
+                })?,
+                None => db.require_card(card.id)?,
+            };
+            &reloaded
+        }
+        Err(e) => {
+            fail_queued_run(d, run.id, &format!("on_enter hook failed: {e:#}"))?;
+            return Ok(false);
+        }
+    };
 
     // A non-NULL snapshot is explicit managed-launch metadata. Legacy v6
     // built-ins remain unmanaged so their persisted all-in-one argv executes
@@ -133,6 +161,24 @@ pub(super) async fn spawn_one(d: &Arc<Daemon>, run: &Run, card: &Card) -> Result
             )
         }
         None => (agent_kind, initial_prompt, system_prompt),
+    };
+    // [fork] A hook's task file replaces the opening message.
+    let initial_prompt = match &task_file {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => {
+                for (key, value) in env.iter_mut() {
+                    if key == "BOARD_PROMPT" {
+                        value.clone_from(&text);
+                    }
+                }
+                initial_prompt.map(|_| text)
+            }
+            Err(e) => {
+                fail_queued_run(d, run.id, &format!("on_enter hook task file {path}: {e}"))?;
+                return Ok(false);
+            }
+        },
+        None => initial_prompt,
     };
     let mut req = HerdrLaunchPlan {
         // Stable, human-readable pane name `card-<id>-<column-slug>`. herdr

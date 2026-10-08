@@ -719,3 +719,66 @@ fn card_move_same_column_clamps_position_and_compacts() {
         .collect();
     assert_eq!(positions, vec![0, 1, 2]);
 }
+
+/// [fork] Moving a card into a manual column fires its `on_enter` hook in the
+/// background with the card and both column names; a reorder within the
+/// column does not.
+#[test]
+fn card_move_into_a_manual_column_fires_its_on_enter_hook() {
+    let out = std::env::temp_dir().join(format!("board-hook-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let mut config = Config::default();
+    config.hook.push(board_core::config::HookDef {
+        project: Some("/alpha".into()),
+        column: "approve plan".into(),
+        on_enter: format!(
+            r#"printf '%s|%s|%s' "$BOARD_CARD_ID" "$BOARD_FROM_COLUMN" "$BOARD_TO_COLUMN" >> {}"#,
+            out.display()
+        ),
+        timeout_secs: Some(10),
+    });
+    let d = test_daemon(config);
+    let alpha = scoped_board(&d, "/alpha");
+    let todo = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()["columns"][0]
+        ["id"]
+        .as_i64()
+        .unwrap();
+    let approve = handle_request(
+        &d,
+        "column.create",
+        json!({ "board_id": alpha, "name": "Approve plan" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let id = handle_request(
+        &d,
+        "card.create",
+        json!({ "board_id": alpha, "column_id": todo, "title": "ship" }),
+    )
+    .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    handle_request(&d, "card.move", json!({ "id": id, "column_id": approve })).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !out.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Let a (wrong) second firing land before reading.
+    handle_request(
+        &d,
+        "card.move",
+        json!({ "id": id, "column_id": approve, "position": 0 }),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let fired = std::fs::read_to_string(&out).unwrap_or_default();
+    let _ = std::fs::remove_file(&out);
+    let todo_name = handle_request(&d, "board.get", json!({ "board_id": alpha })).unwrap()
+        ["columns"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(fired, format!("{id}|{todo_name}|Approve plan"));
+}

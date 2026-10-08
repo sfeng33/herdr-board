@@ -115,3 +115,35 @@ fn root_config_rejects_bad_values_and_malformed_toml() {
         Err(Error::Config(_))
     ));
 }
+
+/// [fork] `[[hook]]` tables parse next to `[daemon]` through the flattened
+/// board config.
+#[test]
+fn parse_on_enter_hooks() {
+    let root = RootConfig::from_toml(
+        r#"
+[daemon]
+tick_ms = 500
+
+[[hook]]
+project = "~/vllm"
+column = "Plan"
+on_enter = "herdr-board-plan-hook"
+timeout_secs = 900
+
+[[hook]]
+column = "Approve plan"
+on_enter = "herdr-board-approve-hook"
+"#,
+    )
+    .unwrap();
+    let hooks = &root.board.hook;
+    assert_eq!(hooks.len(), 2);
+    assert_eq!(hooks[0].project.as_deref(), Some("~/vllm"));
+    assert_eq!(hooks[0].column, "Plan");
+    assert_eq!(hooks[0].on_enter, "herdr-board-plan-hook");
+    assert_eq!(hooks[0].timeout_secs, Some(900));
+    assert_eq!(hooks[1].project, None);
+    assert_eq!(hooks[1].timeout_secs, None);
+    assert_eq!(root.daemon.tick_ms, 500);
+}

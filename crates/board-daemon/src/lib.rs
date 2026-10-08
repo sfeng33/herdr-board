@@ -7,6 +7,7 @@
 mod dispatch;
 mod herdr_conn;
 mod herdr_snapshot;
+mod hooks;
 mod logging;
 mod ops;
 mod recovery;

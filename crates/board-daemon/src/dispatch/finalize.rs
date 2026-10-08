@@ -83,7 +83,7 @@ fn finalize_run_inner(
 ) -> Result<Option<(Run, Card)>> {
     // Scheduler -> store is the sole lock order. The complete durable outcome
     // is committed while both locks are held; all external effects follow it.
-    let (removed, effects, notify) = {
+    let (removed, effects, notify, hook) = {
         let mut sched = d.sched.lock().unwrap();
         let db = d.store.lock();
         let existing = db.get_run(run_id)?;
@@ -122,6 +122,7 @@ fn finalize_run_inner(
         let mut next = None;
         let mut next_hops = None;
         let mut notify = None;
+        let mut hook = None;
         if transition {
             let current = db.require_column(existing.column_id)?;
             let cols = db.list_columns(card.board_id)?;
@@ -181,6 +182,7 @@ fn finalize_run_inner(
                         format!("Card #{} ready for review", card.id),
                         format!("Entered {}", target.name),
                     ));
+                    hook = Some((current.clone(), target.clone()));
                 }
             }
         }
@@ -207,7 +209,7 @@ fn finalize_run_inner(
         }
         #[cfg(test)]
         d.record_effect("scheduler");
-        (removed, effects, notify)
+        (removed, effects, notify, hook)
     };
 
     // Post-commit effects are deliberately ordered and contain no DB writes.
@@ -221,6 +223,9 @@ fn finalize_run_inner(
     }
     if let Some((title, body)) = notify {
         d.notify(title, Some(body), NotificationSound::Request);
+    }
+    if let Some((from, to)) = &hook {
+        crate::hooks::fire(d, &effects.card, Some(from), to);
     }
     // The closing half of the `launch` span's story: one event per run end,
     // never in a loop.
