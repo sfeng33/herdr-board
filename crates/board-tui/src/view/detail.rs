@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, DetailScrollTarget};
 use crate::widgets::{
-    button_text, render_button_chip_at, ActionButton, ActionStrip, ActionTone, UiAction,
+    button_text, render_button_chip_at, ActionButton, ActionStrip, ActionTone, UiAction, Zone,
 };
 
 use super::{
@@ -17,6 +17,40 @@ use super::{
 };
 
 // -- detail ------------------------------------------------------------------
+
+/// [fork] The description section: one row per link button (see
+/// `crate::links`) above the description text without its link lines. Rows
+/// the section is too short to show get no click zone; the digit keys reach
+/// every link.
+fn render_description(app: &App, f: &mut Frame, detail: &CardDetail, area: Rect) {
+    let links = crate::links::card_links(detail);
+    let button_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let mut hit_map = app.hit_map.borrow_mut();
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, link) in links.iter().enumerate() {
+        let text = crate::links::button_text(idx, link);
+        let width = (text.chars().count() as u16).min(inner.width);
+        if (idx as u16) < inner.height {
+            hit_map.push(
+                Rect::new(inner.x, inner.y + idx as u16, width, 1),
+                Zone::LinkButton(idx),
+            );
+        }
+        lines.push(Line::from(Span::styled(text, button_style)));
+    }
+    drop(hit_map);
+    let text = crate::links::description_without_links(&detail.card.description);
+    lines.extend(Text::raw(text).lines);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(section_block("Description", false)),
+        area,
+    );
+}
 
 fn detail_panel_area(app: &App, area: Rect) -> Rect {
     if app.detail_fullscreen {
@@ -224,7 +258,8 @@ pub fn comment_row_spans(detail: &CardDetail, width: u16) -> Vec<(usize, usize)>
     let mut out = Vec::with_capacity(detail.comments.len());
     let mut row = 0usize;
     for c in &detail.comments {
-        let n = wrapped_row_count(&format!(" [{}] {}", c.author, c.body), width);
+        let body = crate::links::comment_display(&c.body);
+        let n = wrapped_row_count(&format!(" [{}] {}", c.author, body), width);
         out.push((row, n));
         row += n;
     }
@@ -342,7 +377,10 @@ fn detail_section_heights(
     available: u16,
     comments_active: bool,
 ) -> ([u16; 3], u16) {
-    let desc_lines = wrapped_line_count(&detail.card.description, width);
+    // [fork] Link lines become one button row each above the remaining text.
+    let link_count = crate::links::card_links(detail).len() as u16;
+    let desc_text = crate::links::description_without_links(&detail.card.description);
+    let desc_lines = wrapped_line_count(&desc_text, width) + link_count;
     let comment_lines = comment_wrapped_rows(detail, width) as u16;
     let run_lines = (detail.runs.len() as u16).max(1);
     let bar_row = if comments_active && !detail.comments.is_empty() {
@@ -892,12 +930,7 @@ pub(super) fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
     }
 
     if layout.description.height >= MIN_CLOSED_SECTION_HEIGHT {
-        f.render_widget(
-            Paragraph::new(card.description.as_str())
-                .wrap(Wrap { trim: false })
-                .block(section_block("Description", false)),
-            layout.description,
-        );
+        render_description(app, f, detail, layout.description);
     }
 
     let compact = app.layout_mode() == super::LayoutMode::Compact;
@@ -983,7 +1016,7 @@ fn draw_comments(app: &App, f: &mut Frame, detail: &CardDetail, layout: &DetailL
                     format!("[{}] ", c.author),
                     Style::default().fg(Color::LightCyan),
                 ),
-                Span::styled(c.body.clone(), style),
+                Span::styled(crate::links::comment_display(&c.body), style),
             ])
         })
         .collect::<Vec<_>>();

@@ -54,6 +54,21 @@ impl App {
         self.detail_runs_scroll = runs_total.saturating_sub(runs_visible.max(1));
     }
 
+    /// [fork] Open the card's `idx`th link button (see `links::card_links`).
+    pub(super) fn open_link(&mut self, idx: usize) -> Vec<Effect> {
+        let link = self
+            .detail
+            .as_ref()
+            .and_then(|detail| crate::links::card_links(detail).into_iter().nth(idx));
+        match link {
+            Some(link) => vec![Effect::OpenUrl(link.url)],
+            None => {
+                self.set_toast(format!("this card has no link {}", idx + 1), true);
+                vec![]
+            }
+        }
+    }
+
     pub(super) fn toggle_detail_fullscreen(&mut self) {
         self.detail_fullscreen = !self.detail_fullscreen;
         self.scroll_detail_to_latest();
@@ -322,6 +337,7 @@ pub(super) fn detail_key(app: &mut App, k: KeyEvent) -> Vec<Effect> {
                 app.screen = Screen::CardForm;
             }
         }
+        KeyCode::Char(c @ '1'..='9') => return app.open_link(c as usize - '1' as usize),
         KeyCode::Char('o') => {
             // Jump to the *selected* run (the highlighted row in the Runs
             // section, the newest run until the user moves the cursor). Never

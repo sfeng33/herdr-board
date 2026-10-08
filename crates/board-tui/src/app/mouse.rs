@@ -379,6 +379,7 @@ fn handle_zone(app: &mut App, zone: Zone) -> Option<Vec<Effect>> {
         Zone::CommentHistory if app.screen == Screen::CardDetail => {
             Some(super::on_key(app, key(KeyCode::Char('h'))))
         }
+        Zone::LinkButton(idx) if app.screen == Screen::CardDetail => Some(app.open_link(idx)),
         _ => None,
     }
 }

@@ -1317,3 +1317,70 @@ fn h_on_a_system_comment_still_loads_history() {
     assert!(matches!(effects.as_slice(), [Effect::LoadCommentHistory { id }] if *id == comment.id));
     assert_eq!(app.screen, Screen::CardDetail);
 }
+
+/// [fork] A card with link lines in its description and comments.
+fn app_with_links() -> board_tui::app::App {
+    let mut client = super::helpers::demo_client().unwrap();
+    let board = client.board_get().unwrap();
+    let card_id = board.cards[0].id;
+    client
+        .comment_add(
+            card_id,
+            "Explainer: https://claude.ai/artifact/abc",
+            Some("agent"),
+        )
+        .unwrap();
+    let mut detail = client.card_get(card_id).unwrap();
+    detail.card.description = "Issue: https://github.com/o/r/issues/12\n\
+                               PR: https://github.com/o/r/pull/13\nFix it."
+        .into();
+    let mut app = board_tui::app::App::new(board);
+    app.last_area = Rect::new(0, 0, 110, 44);
+    app.detail = Some(detail);
+    app.screen = Screen::CardDetail;
+    app
+}
+
+#[test]
+fn detail_digit_keys_open_card_links_in_order() {
+    let mut app = app_with_links();
+    let effects = update(&mut app, key(KeyCode::Char('1')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::OpenUrl(url)] if url == "https://github.com/o/r/issues/12"
+    ));
+    let effects = update(&mut app, key(KeyCode::Char('3')));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::OpenUrl(url)] if url == "https://claude.ai/artifact/abc"
+    ));
+    // No fourth link: nothing opens.
+    assert!(update(&mut app, key(KeyCode::Char('4'))).is_empty());
+}
+
+#[test]
+fn detail_link_buttons_replace_link_lines_and_open_on_click() {
+    let mut app = app_with_links();
+    let rows = board_tui::testkit::rendered_rows(&app);
+    let (y, row) = rows
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.contains("[2 PR #13]"))
+        .expect("the PR button is rendered");
+    // One button per row, in order, above the remaining description text.
+    assert!(rows[y - 1].contains("[1 Issue #12]"));
+    assert!(rows[y + 1].contains("[3 Explainer]"));
+    assert!(!row.contains("Issue") && !row.contains("Explainer"));
+    assert!(rows.iter().any(|row| row.contains("Fix it.")));
+    assert!(!rows.iter().any(|row| row.contains("PR: https://")));
+    // The comment's link line shows only its label.
+    assert!(!rows.iter().any(|row| row.contains("claude.ai/artifact")));
+
+    let byte = row.find("[2 PR").unwrap();
+    let x = row[..byte].chars().count() as u16 + 1;
+    let effects = update(&mut app, board_tui::testkit::left_down(x, y as u16));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::OpenUrl(url)] if url == "https://github.com/o/r/pull/13"
+    ));
+}

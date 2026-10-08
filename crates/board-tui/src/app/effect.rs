@@ -90,6 +90,8 @@ pub enum Effect {
     /// Focus one exact run's pane: `(card_id, run_id)`. The run is chosen by
     /// the TUI (`run.focus` never picks one implicitly).
     FocusRun(i64, i64),
+    /// [fork] Open a card link in the browser.
+    OpenUrl(String),
     /// Hand the focused multiline text field to `$EDITOR`.
     EditFocusedTextArea,
     /// Fetch `harness.capabilities` + `session.list` + `space.list` for the open

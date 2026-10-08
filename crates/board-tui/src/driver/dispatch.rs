@@ -260,10 +260,41 @@ impl Driver {
                 self.mutate(r, After::CardThenBoard(id));
             }
             Effect::FocusRun(card_id, run_id) => self.focus_run(card_id, run_id),
+            Effect::OpenUrl(url) => self.open_url(&url),
             Effect::EditFocusedTextArea => self.edit_focused(),
             Effect::LoadFormOptions => self.load_form_options(),
             Effect::SetPaneTitle(filter) => self.set_pane_title(filter),
             Effect::Quit => self.app.should_quit = true,
+        }
+    }
+
+    /// [fork] Hand a card link to the platform opener: `open` on macOS, else
+    /// `$BROWSER` or `xdg-open` (which a remote host can route back to the
+    /// user's own browser). The child is reaped on a thread so the TUI never
+    /// waits on it.
+    pub(super) fn open_url(&mut self, url: &str) {
+        let opener = if cfg!(target_os = "macos") {
+            "open".to_string()
+        } else {
+            std::env::var("BROWSER")
+                .ok()
+                .filter(|browser| !browser.trim().is_empty())
+                .unwrap_or_else(|| "xdg-open".to_string())
+        };
+        let spawned = std::process::Command::new(&opener)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+                self.app.set_toast(format!("opening {url}"), false);
+            }
+            Err(error) => self
+                .app
+                .set_toast(format!("could not run {opener}: {error}"), true),
         }
     }
 

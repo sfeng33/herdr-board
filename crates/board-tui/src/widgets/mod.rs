@@ -154,6 +154,8 @@ pub enum Zone {
     CommentDelete,
     /// Card detail comments action bar: view the focused comment's history.
     CommentHistory,
+    /// [fork] A card detail link button, by index into `links::card_links`.
+    LinkButton(usize),
 }
 
 /// Rects registered during the current frame's draw, consulted by the mouse
